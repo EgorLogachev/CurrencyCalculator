@@ -1,6 +1,7 @@
 package com.example.currencycalculator.data
 
 import com.example.currencycalculator.data.networking.ApiService
+import com.example.currencycalculator.data.storage.ConversionsStorage
 import com.example.currencycalculator.data.utils.getFormattedDate
 
 import kotlinx.coroutines.Dispatchers
@@ -10,10 +11,15 @@ import javax.inject.Inject
 
 interface Repository {
     suspend fun getCurrencies(date: Date): Result<List<Currency>>
+
+    suspend fun getHistory(): Result<List<Conversion>>
+
+    suspend fun updateHistory(conversion: Conversion? = null): Result<List<Conversion>>
 }
 
 class RepositoryImpl @Inject constructor(
-    private val apiService: ApiService
+    private val apiService: ApiService,
+    private val storage: ConversionsStorage
 ) : Repository {
 
     companion object {
@@ -38,6 +44,18 @@ class RepositoryImpl @Inject constructor(
                 }
             }
         }
+    }
+
+    override suspend fun getHistory() = updateHistory()
+
+    override suspend fun updateHistory(conversion: Conversion?): Result<List<Conversion>> {
+        return withContext(Dispatchers.IO) {
+            conversion?.let {
+                storage.add(conversion)
+            }
+            Result.success(storage.history)
+        }
+
     }
 
 }

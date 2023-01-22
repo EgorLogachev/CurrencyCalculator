@@ -18,10 +18,14 @@ import androidx.fragment.app.viewModels
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.example.currencycalculator.data.Conversion
 import com.example.currencycalculator.data.Currency
 import com.example.currencycalculator.data.utils.getFormattedDate
 import com.example.currencycalculator.databinding.FragmentFirstBinding
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
 import java.util.*
 import java.util.regex.Matcher
@@ -40,29 +44,48 @@ class CurrencyCalculatorFragment : Fragment() {
     private val binding get() = _binding!!
     private val originAdapter = ChooserAdapter()
     private val targetAdapter = ChooserAdapter()
+    private val historyAdapter = HistoryAdapter()
 
     private var originalCurrency: Currency? = null
     private var targetCurrency: Currency? = null
     private val historyDebouncer = Debouncer(2000L) {
-        //todo add conversion saving here
+        val originalAmount = originalAmount()
+        val targetAmount = targetAmount()
+        if (originalCurrency != null
+            && targetCurrency != null
+            && originalAmount != 0f
+            && targetAmount != 0f
+        ) {
+            viewModel.updateHistory(
+                Conversion(
+                    originalAmount = originalAmount,
+                    targetAmount = targetAmount,
+                    originalCurrency = originalCurrency!!,
+                    targetCurrency = targetCurrency!!
+                )
+            )
+        }
     }
 
     private val originalTextWatcher = CurrencyTextWatcher {
         val targetAmount =
             convertCurrencies(it.toFloat(), originalCurrency, targetCurrency)
         binding.targetCurrencyTextField.setText(targetAmount.toFormattedString("%.2f"))
-
-        // ToDo: add debouncer change history by this action
+        historyDebouncer.debounce()
     }
+
     private val targetTextWatcher = CurrencyTextWatcher {
         val originalAmount =
             convertCurrencies(it.toFloat(), targetCurrency, originalCurrency)
         binding.originalCurrencyTextField.setText(originalAmount.toFormattedString("%.2f"))
-        // ToDo: change history by this action
+        historyDebouncer.debounce()
     }
 
-    private fun convertCurrencies(originalAmount: Float, originalCurrency: Currency?, targetCurrency: Currency?) =
-        originalAmount * (originalCurrency?.rate ?: 0f)  / (targetCurrency?.rate ?: 1f)
+    private fun convertCurrencies(
+        originalAmount: Float,
+        originalCurrency: Currency?,
+        targetCurrency: Currency?
+    ) = originalAmount * (originalCurrency?.rate ?: 0f) / (targetCurrency?.rate ?: 1f)
 
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
@@ -77,16 +100,20 @@ class CurrencyCalculatorFragment : Fragment() {
         // fetch data from ViewModel
         lifecycleScope.launch {
             viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
-                viewModel.uiState.collect {
-                    when (it) {
-                        is State.Loading -> setUiEnabled(false)
-                        is State.Success -> {
-                            originAdapter.setCurrencies(it.currencies)
-                            targetAdapter.setCurrencies(it.currencies)
-                            setUiEnabled(true)
-                        }
-                        is State.Error -> Toast.makeText(activity, it.e.message, Toast.LENGTH_SHORT)
-                            .show()
+                viewModel.uiState.catch {
+                    Toast.makeText(
+                        requireContext(),
+                        it.message ?: "UNEXPECTED ERROR!!!",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }.collect {
+                    if (it.isLoading) {
+                        setUiEnabled(false)
+                    } else {
+                        setUiEnabled(true)
+                        originAdapter.setCurrencies(it.currencies)
+                        targetAdapter.setCurrencies(it.currencies)
+                        historyAdapter.setHistory(it.history)
                     }
                 }
             }
@@ -103,6 +130,7 @@ class CurrencyCalculatorFragment : Fragment() {
                             binding.dateChooser.text = getFormattedDate()
                             viewModel.fetchCurrencies(this)
                         }
+                        historyDebouncer.debounce()
                     }
                 }.show(parentFragmentManager, DatePickerFragment.DATE_PICKER_TAG)
             }
@@ -120,11 +148,12 @@ class CurrencyCalculatorFragment : Fragment() {
             originalCurrencyChooser.onCurrencySelected {
                 originalCurrency = it
                 val targetAmount = convertCurrencies(
-                    binding.originalCurrencyTextField.text.toFloat(),
+                    originalAmount(),
                     it,
                     targetCurrency
                 )
                 binding.targetCurrencyTextField.setText(targetAmount.toFormattedString("%.2f"))
+                historyDebouncer.debounce()
             }
 
             //target currency chooser setup
@@ -132,14 +161,22 @@ class CurrencyCalculatorFragment : Fragment() {
             targetCurrencyChooser.onCurrencySelected {
                 targetCurrency = it
                 val targetAmount = convertCurrencies(
-                    binding.originalCurrencyTextField.text.toFloat(),
+                    originalAmount(),
                     originalCurrency,
                     it
                 )
                 binding.targetCurrencyTextField.setText(targetAmount.toFormattedString("%.2f"))
+                historyDebouncer.debounce()
             }
+
+            operationsHistory.layoutManager = LinearLayoutManager(requireContext())
+            operationsHistory.adapter = historyAdapter
         }
     }
+
+    private fun originalAmount() = binding.originalCurrencyTextField.text.toFloat()
+
+    private fun targetAmount() = binding.targetCurrencyTextField.text.toFloat()
 
     private fun onTextFieldFocusChanged(view: View, hasFocus: Boolean) {
         binding.apply {
@@ -231,7 +268,8 @@ inline fun Spinner.onCurrencySelected(crossinline onCurrencySelected: (Currency)
     }
 }
 
-internal class ChooserAdapter(private var currencies: List<Currency> = listOf()) : BaseAdapter() {
+internal class ChooserAdapter(private var currencies: List<Currency> = emptyList()) :
+    BaseAdapter() {
 
     override fun getCount() = currencies.size
 
@@ -242,7 +280,7 @@ internal class ChooserAdapter(private var currencies: List<Currency> = listOf())
     override fun getView(p0: Int, p1: View?, p2: ViewGroup?): View {
         val item = p1 ?: LayoutInflater
             .from(p2?.context)
-            .inflate(android.R.layout.simple_spinner_item, p2, false)
+            .inflate(android.R.layout.simple_spinner_dropdown_item, p2, false)
         return item.findViewById<TextView>(android.R.id.text1).apply {
             text = currencies[p0].text
         }
@@ -295,5 +333,37 @@ internal class Debouncer(private val delay: Long, private val action: () -> Unit
         timer.schedule(delay) {
             action.invoke()
         }
+    }
+}
+
+internal class HistoryAdapter(private var history: List<Conversion> = emptyList()) :
+    RecyclerView.Adapter<HistoryAdapter.ViewHolder>() {
+
+    class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+
+        val textView: TextView
+
+        init {
+            textView = view.findViewById(android.R.id.text1)
+        }
+    }
+
+    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
+        val view = LayoutInflater.from(parent.context)
+            .inflate(android.R.layout.simple_list_item_1, parent, false)
+        return ViewHolder(view)
+    }
+
+    fun setHistory(history: List<Conversion>) {
+        this.history = history
+        notifyDataSetChanged()
+    }
+
+    override fun getItemCount() = history.size
+
+    override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+        val conversion = history[position]
+        holder.textView.text =
+            "${conversion.originalAmount} ${conversion.originalCurrency.text} -> ${conversion.targetAmount} ${conversion.targetCurrency.text}"
     }
 }
